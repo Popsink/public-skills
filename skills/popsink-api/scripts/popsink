@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+#
+# popsink — minimal authenticated client for a Popsink data-plane API.
+#
+#   popsink <METHOD> <path> [json-body]
+#
+#   popsink GET  /envs/
+#   popsink GET  '/datamodels/?env=<uuid>&state=error&size=100'
+#   popsink POST /connectors/<uuid>/stop
+#   popsink PATCH /users/me '{"active_env_id": "<uuid>"}'
+#   echo '{"name": "..."}' | popsink POST /subscriptions/ -
+#
+# Reads POPSINK_URL and POPSINK_API_KEY from the environment. Exchanges the
+# API key for a bearer token, caches it (mode 600) until just before it
+# expires, and retries once on 401. Requires curl and jq.
+#
+set -euo pipefail
+
+_die() { printf 'popsink: %s\n' "$1" >&2; exit 2; }
+
+[ $# -ge 2 ] || _die "usage: popsink <METHOD> <path> [json-body|-]"
+command -v curl >/dev/null || _die "curl is required"
+command -v jq   >/dev/null || _die "jq is required"
+[ -n "${POPSINK_URL:-}" ]     || _die "POPSINK_URL is not set (e.g. https://<tenant>.<region>.popsink.com)"
+[ -n "${POPSINK_API_KEY:-}" ] || _die "POPSINK_API_KEY is not set (create one in the control plane, Dashboard > API keys)"
+
+METHOD=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+REQ_PATH=$2
+BODY=${3:-}
+[ "$BODY" = "-" ] && BODY=$(cat)
+
+BASE=${POPSINK_URL%/}
+case $REQ_PATH in /*) ;; *) REQ_PATH="/$REQ_PATH" ;; esac
+
+# The data-plane API is always mounted under /api; accept either spelling.
+case $REQ_PATH in /api/*) REQ_PATH=${REQ_PATH#/api} ;; esac
+
+# One cache entry per (instance, key) pair. The key is only ever used as a
+# hash input here — it is never written to disk.
+_fingerprint() {
+  printf '%s|%s' "$BASE" "$POPSINK_API_KEY" |
+    { command -v shasum >/dev/null && shasum -a 256 || sha256sum; } |
+    cut -c1-16
+}
+CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}/popsink
+CACHE_FILE=$CACHE_DIR/token-$(_fingerprint)
+
+# The exchanged token lives 10 minutes and no refresh token is issued, so the
+# key must be re-presented. Expire the cache a minute early to avoid racing it.
+TOKEN_TTL=540
+
+_login() {
+  local response token
+  response=$(curl -sS -X POST "$BASE/api/auth/jwt/login-from-api-key" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg k "$POPSINK_API_KEY" '{api_key: $k}')") || _die "could not reach $BASE"
+  token=$(printf '%s' "$response" | jq -r '.access_token // empty')
+  if [ -z "$token" ]; then
+    _die "API key exchange failed: $(printf '%s' "$response" | jq -rc '.detail // .')"
+  fi
+  mkdir -p "$CACHE_DIR"
+  ( umask 077; printf '%s\t%s\n' "$(( $(date +%s) + TOKEN_TTL ))" "$token" > "$CACHE_FILE" )
+  printf '%s' "$token"
+}
+
+_token() {
+  local expiry cached
+  if [ -f "$CACHE_FILE" ]; then
+    IFS=$'\t' read -r expiry cached < "$CACHE_FILE" || true
+    if [ -n "${cached:-}" ] && [ "$(date +%s)" -lt "${expiry:-0}" ]; then
+      printf '%s' "$cached"
+      return 0
+    fi
+  fi
+  _login
+}
+
+OUT=$(mktemp); trap 'rm -f "$OUT"' EXIT
+
+_call() {
+  local token=$1 args
+  args=(-sS -o "$OUT" -w '%{http_code}' -X "$METHOD" "$BASE/api$REQ_PATH"
+        -H "Authorization: Bearer $token" -H 'Accept: application/json')
+  [ -n "$BODY" ] && args+=(-H 'Content-Type: application/json' -d "$BODY")
+  curl "${args[@]}"
+}
+
+# `_die` inside a command substitution only kills the subshell, so propagate.
+TOKEN=$(_token) || exit 2
+STATUS=$(_call "$TOKEN")
+if [ "$STATUS" = "401" ]; then
+  rm -f "$CACHE_FILE"
+  TOKEN=$(_login) || exit 2
+  STATUS=$(_call "$TOKEN")
+fi
+
+jq . "$OUT" 2>/dev/null || cat "$OUT"
+[ "$STATUS" -lt 400 ] || { printf 'popsink: HTTP %s on %s %s\n' "$STATUS" "$METHOD" "$REQ_PATH" >&2; exit 1; }
