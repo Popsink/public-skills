@@ -67,3 +67,7 @@ A skill that drives a live deployment carries the same obligation the other
 way: see [SECURITY.md](SECURITY.md) for how to report a vulnerability, what
 never to paste into an issue, and the two refusals built into the `popsink`
 helper.
+
+## License
+
+[Apache-2.0](LICENSE).
