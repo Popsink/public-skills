@@ -54,3 +54,16 @@ read:
 - No credentials, API keys, or tokens — not even expired ones.
 - No internal-only URLs, dashboards, or ticket links.
 - English only, in every file.
+
+The first three are enforced on every pull request by
+[`.github/scripts/check-public-safety.sh`](.github/scripts/check-public-safety.sh)
+and a gitleaks pass. Run it yourself before pushing:
+
+```bash
+.github/scripts/check-public-safety.sh
+```
+
+A skill that drives a live deployment carries the same obligation the other
+way: see [SECURITY.md](SECURITY.md) for how to report a vulnerability, what
+never to paste into an issue, and the two refusals built into the `popsink`
+helper.
