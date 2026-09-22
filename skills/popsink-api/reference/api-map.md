@@ -6,6 +6,19 @@ schema at `$POPSINK_URL/api/openapi.json` (browsable at `$POPSINK_URL/api/docs`)
 and that is what you call against. Confirm the path, parameters and body shape
 there before issuing a request.
 
+This map covers the endpoints an operator drives an instance with. It leaves
+out the ones reserved for the deployment operator (whole-deployment export and
+import, impersonation, Kubernetes secret metadata, process introspection) and
+the ones a worker calls inward (metric ingestion, heartbeats, state pushes) —
+they answer 403 to a normal key, and listing them here would only invite
+probing. The live schema remains authoritative for everything, including them.
+
+**Credentials.** Connector configs are redacted on read: `GET /connectors/{id}`,
+`/connectors/source-config` and `/connectors/target-config` replace inline
+secrets with `"<redacted>"`. The two `*-worker-config` endpoints are the
+exception — they serve the worker, so they return the customer's credentials in
+clear. Do not print, log, save or paste their response.
+
 All paths are relative to `$POPSINK_URL/api`. Trailing slashes are part of the
 path. Everything except the auth exchange and the probes needs an
 `Authorization: Bearer <token>` header.
@@ -15,10 +28,8 @@ path. Everything except the auth exchange and the probes needs an
 | Endpoint | Purpose |
 |---|---|
 | `POST /auth/forgot-password` | Forgot password |
-| `POST /auth/jwt/impersonate/{user_id}` | Impersonate another user (admin only) |
 | `POST /auth/jwt/login` | Login |
 | `POST /auth/jwt/login-from-api-key` | Login from api key |
-| `POST /auth/jwt/login-from-control-plane-token` | Login from control plane token |
 | `POST /auth/jwt/logout` | Logout |
 | `POST /auth/jwt/refresh` | Refresh |
 | `POST /auth/register` | Register |
@@ -31,8 +42,6 @@ path. Everything except the auth exchange and the probes needs an
 | Endpoint | Purpose |
 |---|---|
 | `GET /users` | List users |
-| `GET /users/export-all` | Export all users, envs, teams, and their relations |
-| `POST /users/import-all` | Import all users, envs, teams, and their relations |
 | `GET /users/me` | Get the current principal, including `active_env_id` |
 | `PATCH /users/me` | Update the current principal — e.g. switch `active_env_id` |
 | `POST /users/me/change-password` | Change password |
@@ -129,7 +138,7 @@ path. Everything except the auth exchange and the probes needs an
 | `GET /connectors/{connector_id}/incremental-load-status` | Get incremental load status |
 | `GET /connectors/{connector_id}/logs` | Get the current connector worker logs snapshot |
 | `GET /connectors/{connector_id}/source-topics` | List source topics or tables |
-| `GET /connectors/{connector_id}/source-worker-config` | Get connector source worker configuration |
+| `GET /connectors/{connector_id}/source-worker-config` | Worker-facing source config — **returns credentials in clear**, see the caution above |
 | `POST /connectors/{connector_id}/start` | Start connector worker |
 | `POST /connectors/{connector_id}/stop` | Stop connector worker |
 | `POST /connectors/{connector_id}/sync` | Start a sync |
@@ -139,7 +148,7 @@ path. Everything except the auth exchange and the probes needs an
 | `GET /connectors/{connector_id}/sync/history` | Get sync history |
 | `POST /connectors/{connector_id}/sync/remove` | Remove queued tables from the sync |
 | `POST /connectors/{connector_id}/sync/reorder` | Reorder the sync queue |
-| `GET /connectors/{connector_id}/target-worker-config` | Get connector target worker configuration |
+| `GET /connectors/{connector_id}/target-worker-config` | Worker-facing target config — **returns credentials in clear**, see the caution above |
 | `POST /connectors/{connector_id}/trigger-blocking-snapshot` | Trigger blocking snapshot |
 | `POST /connectors/{connector_id}/trigger-incremental-load` | Trigger incremental load |
 
@@ -197,11 +206,7 @@ path. Everything except the auth exchange and the probes needs an
 | Endpoint | Purpose |
 |---|---|
 | `GET /workers/consumption-metrics` | List per-subscription consumption metrics since a given date |
-| `POST /workers/ingest-consumption-metrics` | Ingest per-subscription consumption metrics from a sink worker |
-| `POST /workers/ingest-production-metrics` | Ingest CDC production metrics from a source worker |
 | `GET /workers/production-metrics` | List CDC production metrics since a given date |
-| `POST /workers/resource/{resource_id}/heartbeat` | Receive heartbeat from worker |
-| `PATCH /workers/resource/{resource_id}/state` | Update worker state by connector ID |
 | `GET /workers/resource/{resource_id}/status` | Get the current worker status snapshot for a resource |
 
 ## Topic inspection
@@ -290,20 +295,13 @@ path. Everything except the auth exchange and the probes needs an
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /schemas/{subject}` | Act on a schema |
+| `POST /schemas/{subject}` | Register a schema under a subject in the schema registry |
 
 ## Brokers
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /brokers/` | Create a broker |
-
-## Kubernetes secrets
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /k8s-secrets` | List Kubernetes secrets available in the worker namespace |
-| `GET /k8s-secrets/{name}/keys` | List keys inside a Kubernetes secret |
+| `POST /brokers/` | Check a broker configuration — connectivity and credentials. Creates nothing. |
 
 ## Notifications
 
@@ -325,7 +323,7 @@ path. Everything except the auth exchange and the probes needs an
 | `GET /healthchecks/broker` | Broker reachability |
 | `GET /healthchecks/control-plane` | Control-plane reachability |
 | `GET /healthchecks/db` | Database reachability |
-| `GET /healthchecks/debug` | Aggregated debug health report |
+| `GET /healthchecks/debug` | Echo the request headers back, credential-bearing ones redacted |
 | `GET /healthchecks/k8s` | Kubernetes API reachability |
 | `GET /healthchecks/schema-registry` | Schema-registry reachability |
 
@@ -335,14 +333,6 @@ path. Everything except the auth exchange and the probes needs an
 |---|---|
 | `GET /livez` | Liveness probe |
 | `GET /readyz` | Readiness probe |
-
-## Internal diagnostics
-
-| Endpoint | Purpose |
-|---|---|
-| `POST /internal/heap-baseline` | Re-anchor the answering process's heap-growth window to now |
-| `GET /internal/heap-growth` | Heap growth of the answering process since its baseline |
-| `GET /internal/resource-metrics` | CPU/memory of the answering process |
 
 ## SMT jobs
 

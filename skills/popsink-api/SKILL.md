@@ -25,8 +25,12 @@ Ask the user for both if they are not already in the environment:
 
 ```bash
 export POPSINK_URL="https://<tenant>.<region>.popsink.com"
-export POPSINK_API_KEY="psk_..."
+read -rs POPSINK_API_KEY && export POPSINK_API_KEY   # prompts, echoes nothing
 ```
+
+`read -rs` rather than `export POPSINK_API_KEY="psk_..."`, so the key never
+lands in shell history. Better still, have it come from wherever you already
+keep secrets — `export POPSINK_API_KEY=$(op read ...)`, `pass`, `vault read`.
 
 Never echo the key, never write it into a file, a script, a commit, a log line
 or a ticket. If one shows up in output you are about to save or share, redact
@@ -59,12 +63,22 @@ expires, and retries once on `401`:
 ```bash
 skills/popsink-api/scripts/popsink GET  /envs/
 skills/popsink-api/scripts/popsink GET  '/datamodels/?state=error&size=100'
-skills/popsink-api/scripts/popsink POST /connectors/<connector-id>/stop
+POPSINK_ALLOW_WRITE=1 skills/popsink-api/scripts/popsink POST /connectors/<connector-id>/stop
 ```
 
 It needs `curl` and `jq`, and reads `POPSINK_URL` / `POPSINK_API_KEY` from the
-environment. Prefer it over hand-rolled `curl` so the token dance stays in one
-place.
+environment. Prefer it over hand-rolled `curl`: the token dance stays in one
+place, and neither the key nor a request body is ever passed on a command line,
+where a process list would expose it to every other user on the machine.
+
+Two refusals are deliberate:
+
+- **Anything but `GET`/`HEAD` needs `POPSINK_ALLOW_WRITE=1`.** The guardrails
+  below ask you to confirm state changes; this is what makes the ask
+  enforceable. Set it on the single command you have just had confirmed — not
+  once for the whole session.
+- **A plaintext `http://` instance is refused** unless `POPSINK_ALLOW_INSECURE=1`
+  says so out loud, because the key travels in the body of every exchange.
 
 ## 2. Discover before you call
 
@@ -182,6 +196,8 @@ snapshot — so don't report it as a gap.
 **Operate**
 
 ```bash
+# every one of these needs POPSINK_ALLOW_WRITE=1, and a confirmed yes first
+export POPSINK_ALLOW_WRITE=1                    # scope it to the confirmed call
 popsink POST "/connectors/$CONNECTOR_ID/start"
 popsink POST "/connectors/$CONNECTOR_ID/stop"
 popsink POST "/datamodels/$DATAMODEL_ID/start"
@@ -223,8 +239,19 @@ wait for a yes. Treat these as requiring explicit confirmation:
 not a licence to restart workers.
 
 **Handle secrets like secrets.** Connector configs contain customer
-credentials. Don't print them, don't paste them into a summary, don't save a
-response body that contains one.
+credentials. On the ordinary read paths — `GET /connectors/{id}`,
+`/connectors/source-config`, `/connectors/target-config` — the API redacts them
+to `"<redacted>"` before they leave. Two endpoints do not, because they serve
+the worker rather than a human:
+
+```
+GET /connectors/{id}/source-worker-config
+GET /connectors/{id}/target-worker-config
+```
+
+They return the customer's database passwords, keys and tokens in clear, and
+the helper prints whole response bodies. Call them only when nothing else
+answers the question, and never print, save, summarise or paste the result.
 
 **Redact when reporting outward.** If output is going into a ticket, a
 document, or anywhere public, strip client names, hostnames, schema and table

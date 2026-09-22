@@ -6,13 +6,19 @@
 #
 #   popsink GET  /envs/
 #   popsink GET  '/datamodels/?env=<uuid>&state=error&size=100'
-#   popsink POST /connectors/<uuid>/stop
-#   popsink PATCH /users/me '{"active_env_id": "<uuid>"}'
-#   echo '{"name": "..."}' | popsink POST /subscriptions/ -
+#   POPSINK_ALLOW_WRITE=1 popsink POST /connectors/<uuid>/stop
+#   POPSINK_ALLOW_WRITE=1 popsink PATCH /users/me '{"active_env_id": "<uuid>"}'
+#   echo '{"name": "..."}' | POPSINK_ALLOW_WRITE=1 popsink POST /subscriptions/ -
 #
 # Reads POPSINK_URL and POPSINK_API_KEY from the environment. Exchanges the
 # API key for a bearer token, caches it (mode 600) until just before it
 # expires, and retries once on 401. Requires curl and jq.
+#
+# Two things it deliberately refuses to do:
+#   - send the key, or any request body, over plaintext HTTP;
+#   - issue anything but GET/HEAD unless POPSINK_ALLOW_WRITE=1 is set, so a
+#     state-changing call is always a conscious act rather than a typo or an
+#     over-eager agent.
 #
 set -euo pipefail
 
@@ -35,6 +41,27 @@ case $REQ_PATH in /*) ;; *) REQ_PATH="/$REQ_PATH" ;; esac
 # The data-plane API is always mounted under /api; accept either spelling.
 case $REQ_PATH in /api/*) REQ_PATH=${REQ_PATH#/api} ;; esac
 
+# The API key travels in the request body of every token exchange, so a
+# plaintext instance URL hands it to anyone on the path. Only a local instance
+# has any business being http://, and that has to be said out loud.
+case $BASE in
+  https://*) ;;
+  http://*)
+    [ "${POPSINK_ALLOW_INSECURE:-}" = "1" ] ||
+      _die "refusing to send the API key over plaintext HTTP ($BASE) — set POPSINK_ALLOW_INSECURE=1 for a local instance" ;;
+  *) _die "POPSINK_URL must be an absolute https:// URL (got: $BASE)" ;;
+esac
+
+# Read-only exploration is free; everything else stops pipelines, rewrites
+# warehouse data or deletes objects. The skill asks for confirmation in prose —
+# this makes the ask enforceable.
+case $METHOD in
+  GET|HEAD) ;;
+  *)
+    [ "${POPSINK_ALLOW_WRITE:-}" = "1" ] ||
+      _die "$METHOD $REQ_PATH changes state — confirm with the user, then re-run with POPSINK_ALLOW_WRITE=1" ;;
+esac
+
 # One cache entry per (instance, key) pair. The key is only ever used as a
 # hash input here — it is never written to disk.
 _fingerprint() {
@@ -51,14 +78,17 @@ TOKEN_TTL=540
 
 _login() {
   local response token
-  response=$(curl -sS -X POST "$BASE/api/auth/jwt/login-from-api-key" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -nc --arg k "$POPSINK_API_KEY" '{api_key: $k}')") || _die "could not reach $BASE"
+  # The key goes in on stdin, never in argv: a process list is readable by
+  # every other user on the machine, and by anything auditing exec().
+  response=$(jq -nc --arg k "$POPSINK_API_KEY" '{api_key: $k}' |
+    curl -sS -X POST "$BASE/api/auth/jwt/login-from-api-key" \
+      -H 'Content-Type: application/json' --data-binary @-) || _die "could not reach $BASE"
   token=$(printf '%s' "$response" | jq -r '.access_token // empty')
   if [ -z "$token" ]; then
     _die "API key exchange failed: $(printf '%s' "$response" | jq -rc '.detail // .')"
   fi
   mkdir -p "$CACHE_DIR"
+  chmod 700 "$CACHE_DIR" 2>/dev/null || true
   ( umask 077; printf '%s\t%s\n' "$(( $(date +%s) + TOKEN_TTL ))" "$token" > "$CACHE_FILE" )
   printf '%s' "$token"
 }
@@ -81,8 +111,14 @@ _call() {
   local token=$1 args
   args=(-sS -o "$OUT" -w '%{http_code}' -X "$METHOD" "$BASE/api$REQ_PATH"
         -H "Authorization: Bearer $token" -H 'Accept: application/json')
-  [ -n "$BODY" ] && args+=(-H 'Content-Type: application/json' -d "$BODY")
-  curl "${args[@]}"
+  # Same reasoning as the key: a connector body carries the customer's database
+  # password, so it is piped in rather than passed on the command line.
+  if [ -n "$BODY" ]; then
+    args+=(-H 'Content-Type: application/json' --data-binary @-)
+    printf '%s' "$BODY" | curl "${args[@]}"
+  else
+    curl "${args[@]}"
+  fi
 }
 
 # `_die` inside a command substitution only kills the subshell, so propagate.
